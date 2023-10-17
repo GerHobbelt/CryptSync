@@ -1,4 +1,5 @@
 # CryptSync
+
 CryptSync is a small utility that synchronizes two folders while encrypting the contents in one folder. That means one of the two folders has all files unencrypted (the files you work with) and the other folder has all the files encrypted.
 
 [![Build Status](https://tortoisesvn.visualstudio.com/tortoisesvnGitHub/_apis/build/status/stefankueng.CryptSync?branchName=main)](https://tortoisesvn.visualstudio.com/tortoisesvnGitHub/_build/latest?definitionId=12&branchName=main)
