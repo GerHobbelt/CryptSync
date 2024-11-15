@@ -177,25 +177,16 @@ void COptionsDlg::DoPairEdit(int iItem)
                 }
                 else
                 {
-                    // found another pair (ie, user changed paths)
-                    if (foundIt->m_syncDir == ToBeDeleted)
-                    { // Pair is empty, re-use it.
-                        t.m_syncDir = ToBeDeleted;
-                        *foundIt    = pd;
-                    }
-                    else
-                    {
-                        // User edited paths and new paths
-                        // are same as another enabled pair. Ignore edits.
-                        MessageBox(*this, L"A pair with same paths already exists. Edits ignored.", L"CryptSync", MB_OK | MB_ICONERROR);
-                    }
+                    MessageBox(*this, L"A pair with same paths already exists. Edits ignored.", L"CryptSync", MB_OK | MB_ICONERROR);
                 }
             }
             else
             {
-                // pd is for new paths, PairData that got edited
-                // is no longer needed.
-                t.m_syncDir = ToBeDeleted;
+                // pd is for new paths, PairData that got edited will be disabled and
+                // new pair created.
+                MessageBox(*this, L"A new pair will be created with specified paths, replacing the pair you edited.", L"CryptSync", MB_OK | MB_ICONWARNING);
+                g_pairs.erase(g_pairs.begin() + lv.lParam);     // .erase must be done before .push_back to ensure lParam is valid.
+                // t.m_enabled = false; // Disable instead of deletion is another option.
                 g_pairs.push_back(pd); // Edition resulted in new pd
             }
             InitPairList();
@@ -261,13 +252,9 @@ LRESULT COptionsDlg::DoCommand(int id)
                     auto pd       = PairData(true, dlg.m_origPath, dlg.m_cryptPath, dlg.m_password, dlg.m_cryptOnly, dlg.m_copyOnly, dlg.m_noSync, dlg.m_compressSize, dlg.m_encNames, dlg.m_encNamesNew, dlg.m_syncDir, dlg.m_7ZExt, dlg.m_useGpg, dlg.m_fat, dlg.m_syncDeleted, dlg.m_ResetOriginalArchAttr);
                     // Ignore new pd if it is on same paths as another pair
                     auto foundIt = std::find(g_pairs.begin(), g_pairs.end(), pd);
-                    if (foundIt == g_pairs.end() || foundIt->m_syncDir == ToBeDeleted)
+                    if (foundIt == g_pairs.end())
                     {
-                        // Append new PairData to g_pairs
-                        if (foundIt == g_pairs.end())
-                            g_pairs.push_back(pd);
-                        else // Re-use "ToBeDeleted" PairData, otherwise ignore new item
-                            *foundIt = pd;
+                        g_pairs.push_back(pd);
                         InitPairList();
                         g_pairs.SavePairs();
                     }
@@ -422,7 +409,7 @@ void COptionsDlg::InitPairList()
     wcscpy_s(buf, L"Sync failures");
     ListView_InsertColumn(hListControl, 2, &lvc);
 
-    for (auto it = g_pairs.cbegin(); it != g_pairs.cend(); ++it)
+    for (auto it = g_pairs.begin(); it != g_pairs.end(); ++it)
     {
         std::wstring origPath  = it->m_origPath;
         std::wstring cryptPath = it->m_cryptPath;
