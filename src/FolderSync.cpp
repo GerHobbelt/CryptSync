@@ -28,6 +28,7 @@
 #include "DebugOutput.h"
 #include "CircularLog.h"
 #include "OnOutOfScope.h"
+#include "COMPtrs.h"
 
 #include <process.h>
 #include <shlobj.h>
@@ -83,6 +84,15 @@ CFolderSync::CFolderSync()
 
 CFolderSync::~CFolderSync()
 {
+    // Thread not always stopped when instance is deleted. For example,
+    // selecting the Exit context menu on the icon while the Options
+    // dialog is displayed can result in crashes. Here is how:
+    // DoModal() on the Options dialog returns as the dialog is closed by
+    // Windows and the CFolderSync thread will *then* be
+    // created, running in parallel to the main thread which is
+    // deleting this instance. CPathWatcher::~CPathWatcher()
+    // also calls its Stop method.
+    Stop();
 }
 
 void CFolderSync::Stop()
@@ -103,6 +113,23 @@ void CFolderSync::SetPairs(const PairVector& pv)
 
 void CFolderSync::SyncFolders(const PairVector& pv, HWND hWnd)
 {
+    if (m_parentWnd != nullptr)
+    {   // An interactive sync is in progress
+        if (hWnd == nullptr)
+            return;                  // skip this background sync request (interactive prioritized)
+        assert(hWnd == m_parentWnd); // New interative sync request
+    }
+    else
+    {
+        if (m_bRunning && hWnd == nullptr)
+        {
+            // let current sync complete, if we stopped it
+            // some folders might never sync (calling this method
+            // faster than time it needs to complete
+            return;
+        }
+        // no sync in progress or requesting a foreground sync, start this one
+    }
     if (m_bRunning)
     {
         Stop();
@@ -179,24 +206,26 @@ int CFolderSync::SyncFolderThread()
     return ret;
 }
 
-void CFolderSync::SyncFile(const std::wstring& path)
+bool CFolderSync::SyncFile(const std::wstring& path)
 {
     // check if the path notification comes from a folder that's
-    // currently synced in the sync thread
+    // currently synced in the sync thread. If so, we "requeue" the
+    // SyncFile since it is possible the sync thread may have already passed the
+    // syncing of this file.
     {
         std::wstring s = m_currentPath.m_origPath;
         if (!s.empty())
         {
             if ((path.size() > s.size()) &&
                 (_wcsicmp(s.c_str(), path.substr(0, s.size()).c_str()) == 0))
-                return;
+                return false;
         }
         s = m_currentPath.m_cryptPath;
         if (!s.empty())
         {
             if ((path.size() > s.size()) &&
                 (_wcsicmp(s.c_str(), path.substr(0, s.size()).c_str()) == 0))
-                return;
+                return false;
         }
     }
 
@@ -204,6 +233,8 @@ void CFolderSync::SyncFile(const std::wstring& path)
     CAutoReadLock locker(m_guard);
     for (auto it = m_pairs.cbegin(); it != m_pairs.cend(); ++it)
     {
+        if (!it->m_enabled)
+            continue;
         std::wstring s = it->m_origPath;
         if (path.size() > s.size())
         {
@@ -225,6 +256,7 @@ void CFolderSync::SyncFile(const std::wstring& path)
             }
         }
     }
+    return true;
 }
 
 void CFolderSync::SyncFile(const std::wstring& plainPath, const PairData& pt)
@@ -912,6 +944,8 @@ std::map<std::wstring, FileData, ci_lessW> CFolderSync::GetFileList(bool orig, c
     {
         if (m_pProgDlg && m_pProgDlg->HasUserCancelled())
             break;
+        if (!m_bRunning)
+            break;
 
         bRecurse = true;
         if (isDir)
@@ -920,8 +954,6 @@ std::map<std::wstring, FileData, ci_lessW> CFolderSync::GetFileList(bool orig, c
                 bRecurse = false; // don't recurse into ignored folders
             continue;
         }
-        if (!m_bRunning)
-            break;
 
         FileData fd;
 
@@ -1632,6 +1664,7 @@ void CFolderSync::AdjustFileAttributes(const std::wstring& fName, DWORD dwFileAt
             CCircularLog::Instance()(_T("INFO:    successfully adjusted attribute on %s"), fName.c_str());
     }
 }
+
 bool CFolderSync::DeletePathToTrash(const std::wstring& path)
 {
     if (path.starts_with(L"\\\\?\\UNC"))
@@ -1644,24 +1677,19 @@ bool CFolderSync::DeletePathToTrash(const std::wstring& path)
         std::wstring newPath = path.substr(4);
         return DeletePathToTrash(newPath);
     }
-    IFileOperation* pfo = nullptr;
-    auto            hr  = CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&pfo));
+    IFileOperationPtr pfo = nullptr;
+    auto              hr  = pfo.CreateInstance(CLSID_FileOperation, nullptr, CLSCTX_ALL);
     if (SUCCEEDED(hr))
     {
         DWORD flags = FOF_ALLOWUNDO | FOF_FILESONLY | FOF_NOCONFIRMATION | FOF_NO_CONNECTED_ELEMENTS | FOF_NOERRORUI | FOF_SILENT | FOF_NORECURSION | FOFX_RECYCLEONDELETE;
         pfo->SetOperationFlags(flags);
-        IShellItem* psiFrom = nullptr;
-        hr                  = SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&psiFrom));
+        IShellItemPtr psiFrom = nullptr;
+        hr                    = SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&psiFrom));
         if ((hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) || (hr == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND)))
-        {
-            pfo->Release();
             return true;
-        }
+
         if (SUCCEEDED(hr))
-        {
             hr = pfo->DeleteItem(psiFrom, nullptr);
-        }
-        psiFrom->Release();
 
         if (SUCCEEDED(hr))
         {
@@ -1670,14 +1698,9 @@ bool CFolderSync::DeletePathToTrash(const std::wstring& path)
             {
                 BOOL fAnyOperationsAborted = false;
                 pfo->GetAnyOperationsAborted(&fAnyOperationsAborted);
-                pfo->Release();
                 if (!fAnyOperationsAborted)
                     return true;
             }
-        }
-        else
-        {
-            pfo->Release();
         }
     }
     // try the SHFileOperation
